@@ -1,70 +1,128 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import yfinance as yf
+import matplotlib.pyplot as plt
 
-st.set_page_config(layout="wide", page_title="Nifty 50 Dashboard")
+# -------------------- PAGE CONFIG --------------------
+st.set_page_config(
+    page_title="Nifty 50 Dashboard",
+    layout="wide"
+)
 
-st.title("📊 Nifty 50 Interactive Analytics Dashboard")
+st.title("📊 Nifty 50 Interactive Dashboard")
 
+# -------------------- LOAD DATA --------------------
 @st.cache_data
-def load_data():
+def load_universe():
     return pd.read_csv("nifty50.csv")
 
-stocks = load_data()
+stocks = load_universe()
 
-st.sidebar.header("Filters")
-sector = st.sidebar.multiselect("Sector", stocks["Sector"].unique())
-search = st.sidebar.text_input("Search Company")
+# -------------------- SIDEBAR FILTERS --------------------
+st.sidebar.header("🔎 Filters")
 
-df = stocks.copy()
-if sector:
-    df = df[df["Sector"].isin(sector)]
-if search:
-    df = df[df["Company"].str.contains(search, case=False)]
+sector_filter = st.sidebar.multiselect(
+    "Select Sector",
+    options=stocks["Sector"].unique()
+)
 
-data = []
-for _, row in df.iterrows():
-    stock = yf.Ticker(row["Symbol"])
-    info = stock.info
-    data.append({
-        "Company": row["Company"],
-        "Sector": row["Sector"],
-        "Price": info.get("currentPrice"),
-        "P/E": info.get("trailingPE"),
-        "ROE": info.get("returnOnEquity")
+search_text = st.sidebar.text_input("Search Company")
+
+filtered = stocks.copy()
+
+if sector_filter:
+    filtered = filtered[filtered["Sector"].isin(sector_filter)]
+
+if search_text:
+    filtered = filtered[
+        filtered["Company"].str.contains(search_text, case=False)
+    ]
+
+# -------------------- FETCH FUNDAMENTALS --------------------
+@st.cache_data(ttl=3600)
+def fetch_fundamentals(symbol):
+    try:
+        info = yf.Ticker(symbol).info
+        return {
+            "Price": info.get("currentPrice"),
+            "PE": info.get("trailingPE"),
+            "ROE": info.get("returnOnEquity"),
+            "MarketCap": info.get("marketCap")
+        }
+    except Exception:
+        return {
+            "Price": None,
+            "PE": None,
+            "ROE": None,
+            "MarketCap": None
+        }
+
+rows = []
+for _, r in filtered.iterrows():
+    fundamentals = fetch_fundamentals(r["Symbol"])
+    rows.append({
+        "Company": r["Company"],
+        "Sector": r["Sector"],
+        **fundamentals
     })
 
-final_df = pd.DataFrame(data)
-st.subheader("📋 Nifty 50 Screener")
-st.dataframe(final_df, use_container_width=True)
+df = pd.DataFrame(rows)
 
-stock_name = st.selectbox("Select Stock", final_df["Company"])
+# -------------------- MAIN TABLE --------------------
+st.subheader("📋 Stock Screener")
 
-selected = final_df[final_df["Company"] == stock_name].iloc[0]
-st.metric("Price", selected["Price"])
+st.dataframe(
+    df,
+    use_container_width=True
+)
 
-symbol = df[df["Company"] == stock_name]["Symbol"].values[0]
-hist = yf.download(symbol, period="5y", progress=False)
+st.download_button(
+    "⬇ Download CSV",
+    df.to_csv(index=False),
+    file_name="nifty_screener.csv"
+)
 
-if not hist.empty and "Close" in hist.columns:
-    close_series = hist["Close"]
+# -------------------- STOCK DRILL DOWN --------------------
+st.subheader("🔍 Stock Drill-Down")
 
-    # Handle MultiIndex / DataFrame edge cases
-    if hasattr(close_series, "columns"):
-        close_series = close_series.iloc[:, 0]
-
-    chart_df = close_series.reset_index()
-    chart_df.columns = ["Date", "Close"]
-    chart_df["Close"] = pd.to_numeric(chart_df["Close"], errors="coerce")
-    chart_df = chart_df.dropna()
-
-    fig = px.line(
-        chart_df,
-        x="Date",
-        y="Close",
-        title="5Y Price Chart"
+if not df.empty:
+    selected_company = st.selectbox(
+        "Select a stock",
+        df["Company"].unique()
     )
-    st.plotly_chart(fig, use_container_width=True)
+
+    selected_row = df[df["Company"] == selected_company].iloc[0]
+    selected_symbol = filtered[
+        filtered["Company"] == selected_company
+    ]["Symbol"].values[0]
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Price (₹)", selected_row["Price"])
+    c2.metric("P/E", selected_row["PE"])
+    c3.metric("ROE", selected_row["ROE"])
+
+    # -------------------- PRICE CHART (STABLE VERSION) --------------------
+    st.subheader("📈 5Y Price Chart")
+
+    try:
+        hist = yf.download(
+            selected_symbol,
+            period="5y",
+            progress=False
+        )
+
+        if not hist.empty:
+            fig, ax = plt.subplots()
+            ax.plot(hist.index, hist["Close"])
+            ax.set_xlabel("Date")
+            ax.set_ylabel("Price")
+            ax.set_title("5 Year Price Trend")
+            st.pyplot(fig)
+        else:
+            st.warning("Price data unavailable.")
+
+    except Exception as e:
+        st.error("Error loading price chart.")
+
 else:
-    st.warning("Price data unavailable for this stock at the moment.")
+    st.warning("No stocks match the selected filters.")
