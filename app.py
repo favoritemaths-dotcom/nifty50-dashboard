@@ -47,10 +47,20 @@ st.metric("Price", selected["Price"])
 symbol = df[df["Company"] == stock_name]["Symbol"].values[0]
 hist = yf.download(symbol, period="5y", progress=False)
 
-if not hist.empty:
-    hist = hist.reset_index()
+if not hist.empty and "Close" in hist.columns:
+    close_series = hist["Close"]
+
+    # Handle MultiIndex / DataFrame edge cases
+    if hasattr(close_series, "columns"):
+        close_series = close_series.iloc[:, 0]
+
+    chart_df = close_series.reset_index()
+    chart_df.columns = ["Date", "Close"]
+    chart_df["Close"] = pd.to_numeric(chart_df["Close"], errors="coerce")
+    chart_df = chart_df.dropna()
+
     fig = px.line(
-        hist,
+        chart_df,
         x="Date",
         y="Close",
         title="5Y Price Chart"
