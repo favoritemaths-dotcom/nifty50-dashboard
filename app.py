@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 import math
+from datetime import datetime
 
 # -------------------------------------------------
 # PAGE CONFIG
@@ -11,7 +12,7 @@ st.set_page_config(page_title="Nifty 50 Analytics Dashboard", layout="wide")
 st.title("📊 Nifty 50 Analytics & Advisory Dashboard")
 
 # -------------------------------------------------
-# LOAD NIFTY 50 UNIVERSE
+# LOAD UNIVERSE
 # -------------------------------------------------
 @st.cache_data
 def load_universe():
@@ -20,7 +21,7 @@ def load_universe():
 stocks = load_universe()
 
 # -------------------------------------------------
-# SESSION STATE (WATCHLIST)
+# SESSION STATE
 # -------------------------------------------------
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
@@ -73,7 +74,7 @@ def get_metrics(symbol):
         return None, None, None, None, None, None
 
 # -------------------------------------------------
-# CASH FLOW RED FLAGS (AUDITOR LOGIC)
+# CASH FLOW RED FLAGS
 # -------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_cashflow_flags(symbol):
@@ -93,10 +94,8 @@ def get_cashflow_flags(symbol):
         if cfo < net_profit:
             flags.append("Operating cash flow is lower than net profit")
 
-        if net_profit != 0:
-            cash_conversion = cfo / net_profit
-            if cash_conversion < 0.8:
-                flags.append("Weak cash conversion (CFO / Net Profit < 0.8)")
+        if net_profit != 0 and (cfo / net_profit) < 0.8:
+            flags.append("Weak cash conversion (CFO / Net Profit < 0.8)")
 
         if net_profit > 0 and cfo < 0:
             flags.append("Negative operating cash flow despite positive profit")
@@ -109,7 +108,30 @@ def get_cashflow_flags(symbol):
         return ["Cash-flow data unavailable"]
 
 # -------------------------------------------------
-# BUILD MASTER TABLE
+# NEWS & EVENTS ENGINE
+# -------------------------------------------------
+@st.cache_data(ttl=900)
+def get_stock_news(symbol):
+    try:
+        t = yf.Ticker(symbol)
+        news = t.news
+        return news[:10] if news else []
+    except Exception:
+        return []
+
+def classify_headline(text):
+    positive_words = ["growth", "profit", "order", "record", "approval", "expansion"]
+    negative_words = ["loss", "decline", "penalty", "fraud", "probe", "downgrade"]
+
+    text = text.lower()
+    if any(w in text for w in positive_words):
+        return "🟢 Positive"
+    if any(w in text for w in negative_words):
+        return "🔴 Caution"
+    return "🟡 Neutral"
+
+# -------------------------------------------------
+# BUILD SCREENER
 # -------------------------------------------------
 rows = []
 for _, r in filtered.iterrows():
@@ -128,7 +150,7 @@ for _, r in filtered.iterrows():
 df = pd.DataFrame(rows)
 
 # -------------------------------------------------
-# SCREENER
+# SCREENER VIEW
 # -------------------------------------------------
 st.subheader("📋 Nifty 50 Screener")
 st.dataframe(df, use_container_width=True)
@@ -147,43 +169,58 @@ c1.metric("Price (₹)", row["Price (₹)"])
 c2.metric("P/E", row["P/E"])
 c3.metric("ROE", row["ROE"])
 
-# Add to watchlist
-if st.button("⭐ Add to Watchlist"):
-    if stock not in st.session_state.watchlist:
-        st.session_state.watchlist.append(stock)
-
 # -------------------------------------------------
 # PRICE CHART
 # -------------------------------------------------
 st.subheader("📈 5-Year Price Trend")
-
 hist = yf.download(symbol, period="5y", progress=False)
 if not hist.empty:
     fig, ax = plt.subplots()
     ax.plot(hist.index, hist["Close"])
     ax.set_xlabel("Date")
     ax.set_ylabel("Price")
-    ax.set_title("5-Year Price Trend")
     st.pyplot(fig)
 
 # -------------------------------------------------
-# PEER COMPARISON
-# -------------------------------------------------
-st.subheader("🧑‍🤝‍🧑 Peer Comparison")
-peers = df[df["Sector"] == row["Sector"]]
-st.dataframe(peers.set_index("Company"), use_container_width=True)
-
-# -------------------------------------------------
-# CASH FLOW RED FLAGS DISPLAY
+# CASH FLOW FLAGS
 # -------------------------------------------------
 st.subheader("💧 Cash Flow Quality Check")
-
-cf_flags = get_cashflow_flags(symbol)
-for f in cf_flags:
+for f in get_cashflow_flags(symbol):
     if "support" in f.lower():
         st.success(f)
     else:
         st.warning(f)
+
+# -------------------------------------------------
+# NEWS & EVENTS SECTION
+# -------------------------------------------------
+st.subheader("📰 Latest News & Events")
+
+news_items = get_stock_news(symbol)
+
+if not news_items:
+    st.info("No recent news available.")
+else:
+    for n in news_items:
+        title = n.get("title", "")
+        link = n.get("link", "")
+        publisher = n.get("publisher", "Unknown")
+        ts = n.get("providerPublishTime")
+
+        time_str = ""
+        if ts:
+            time_str = datetime.fromtimestamp(ts).strftime("%d %b %Y, %H:%M")
+
+        sentiment = classify_headline(title)
+
+        st.markdown(
+            f"""
+            **[{title}]({link})**  
+            *{publisher} | {time_str}*  
+            **Sentiment:** {sentiment}
+            ---
+            """
+        )
 
 # -------------------------------------------------
 # PORTFOLIO ADVISORY
@@ -208,9 +245,7 @@ if st.button("Generate Portfolio"):
     allocation = capital / len(pf)
 
     pf = pf.copy()
-    pf["Shares to Buy"] = pf["Price (₹)"].apply(
-        lambda x: math.floor(allocation / x)
-    )
+    pf["Shares to Buy"] = pf["Price (₹)"].apply(lambda x: math.floor(allocation / x))
     pf["Actual Invested (₹)"] = pf["Shares to Buy"] * pf["Price (₹)"]
 
     total_invested = pf["Actual Invested (₹)"].sum()
@@ -229,20 +264,4 @@ if st.button("Generate Portfolio"):
         **Invested:** ₹{total_invested:,.0f}  
         **Cash Left:** ₹{cash_left:,.0f}
         """
-    )
-
-    # Allocation Pie
-    fig2, ax2 = plt.subplots()
-    ax2.pie(pf["Actual Invested (₹)"], labels=pf["Company"], autopct="%1.1f%%")
-    ax2.set_title("Portfolio Allocation")
-    st.pyplot(fig2)
-
-# -------------------------------------------------
-# WATCHLIST
-# -------------------------------------------------
-st.subheader("⭐ Watchlist")
-
-if st.session_state.watchlist:
-    st.write(st.session_state.watchlist)
-else:
-    st.info("No stocks added yet.")
+        )
