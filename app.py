@@ -21,12 +21,6 @@ def load_universe():
 stocks = load_universe()
 
 # -------------------------------------------------
-# SESSION STATE
-# -------------------------------------------------
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = []
-
-# -------------------------------------------------
 # SIDEBAR FILTERS
 # -------------------------------------------------
 st.sidebar.header("🔎 Filters")
@@ -74,28 +68,48 @@ def get_metrics(symbol):
         return None, None, None, None, None, None
 
 # -------------------------------------------------
-# CASH FLOW RED FLAGS
+# ROBUST CASH FLOW CHECK (FIXED)
 # -------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_cashflow_flags(symbol):
     try:
         t = yf.Ticker(symbol)
-        cashflow = t.cashflow
-        income = t.financials
+        cf = t.cashflow
+        inc = t.financials
 
-        if cashflow is None or income is None:
-            return ["Cash-flow data unavailable"]
+        if cf is None or inc is None or cf.empty or inc.empty:
+            return ["Cash-flow data not published by source"]
 
-        cfo = cashflow.loc["Total Cash From Operating Activities"].iloc[0]
-        net_profit = income.loc["Net Income"].iloc[0]
+        # Possible row names (Yahoo is inconsistent)
+        cfo_rows = [
+            "Total Cash From Operating Activities",
+            "Operating Cash Flow",
+            "Net Cash Provided by Operating Activities"
+        ]
+
+        cfo = None
+        for r in cfo_rows:
+            if r in cf.index:
+                cfo = cf.loc[r].iloc[0]
+                break
+
+        if cfo is None:
+            return ["Operating cash-flow not reported"]
+
+        if "Net Income" not in inc.index:
+            return ["Net income data unavailable"]
+
+        net_profit = inc.loc["Net Income"].iloc[0]
 
         flags = []
 
         if cfo < net_profit:
             flags.append("Operating cash flow is lower than net profit")
 
-        if net_profit != 0 and (cfo / net_profit) < 0.8:
-            flags.append("Weak cash conversion (CFO / Net Profit < 0.8)")
+        if net_profit != 0:
+            ratio = cfo / net_profit
+            if ratio < 0.8:
+                flags.append("Weak cash conversion (CFO / Net Profit < 0.8)")
 
         if net_profit > 0 and cfo < 0:
             flags.append("Negative operating cash flow despite positive profit")
@@ -104,29 +118,30 @@ def get_cashflow_flags(symbol):
             flags.append("Cash flows broadly support reported profits")
 
         return flags
+
     except Exception:
-        return ["Cash-flow data unavailable"]
+        return ["Cash-flow data not available"]
 
 # -------------------------------------------------
-# NEWS & EVENTS ENGINE
+# NEWS ENGINE (IMPROVED)
 # -------------------------------------------------
 @st.cache_data(ttl=900)
 def get_stock_news(symbol):
     try:
-        t = yf.Ticker(symbol)
-        news = t.news
-        return news[:10] if news else []
+        n = yf.Ticker(symbol).news
+        return [x for x in n if x.get("title")]
     except Exception:
         return []
 
-def classify_headline(text):
-    positive_words = ["growth", "profit", "order", "record", "approval", "expansion"]
-    negative_words = ["loss", "decline", "penalty", "fraud", "probe", "downgrade"]
+def classify_sentiment(title):
+    title = title.lower()
 
-    text = text.lower()
-    if any(w in text for w in positive_words):
+    positive = ["profit", "growth", "order", "approval", "record", "expansion"]
+    negative = ["loss", "penalty", "fraud", "probe", "downgrade", "decline"]
+
+    if any(w in title for w in positive):
         return "🟢 Positive"
-    if any(w in text for w in negative_words):
+    if any(w in title for w in negative):
         return "🔴 Caution"
     return "🟡 Neutral"
 
@@ -150,13 +165,13 @@ for _, r in filtered.iterrows():
 df = pd.DataFrame(rows)
 
 # -------------------------------------------------
-# SCREENER VIEW
+# SCREENER
 # -------------------------------------------------
 st.subheader("📋 Nifty 50 Screener")
 st.dataframe(df, use_container_width=True)
 
 # -------------------------------------------------
-# STOCK DRILL-DOWN
+# STOCK VIEW
 # -------------------------------------------------
 st.subheader("🔍 Stock Drill-Down")
 
@@ -177,12 +192,10 @@ hist = yf.download(symbol, period="5y", progress=False)
 if not hist.empty:
     fig, ax = plt.subplots()
     ax.plot(hist.index, hist["Close"])
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Price")
     st.pyplot(fig)
 
 # -------------------------------------------------
-# CASH FLOW FLAGS
+# CASH FLOW DISPLAY
 # -------------------------------------------------
 st.subheader("💧 Cash Flow Quality Check")
 for f in get_cashflow_flags(symbol):
@@ -192,84 +205,26 @@ for f in get_cashflow_flags(symbol):
         st.warning(f)
 
 # -------------------------------------------------
-# NEWS & EVENTS SECTION
+# NEWS DISPLAY
 # -------------------------------------------------
 st.subheader("📰 Latest News & Events")
 
-news_items = get_stock_news(symbol)
+news = get_stock_news(symbol)
 
-if not news_items:
-    st.info("No recent news available.")
+if not news:
+    st.info("No recent news available from public sources.")
 else:
-    for n in news_items:
-        title = n.get("title", "")
+    for n in news[:8]:
+        title = n["title"]
         link = n.get("link", "")
-        publisher = n.get("publisher", "Unknown")
         ts = n.get("providerPublishTime")
-
-        time_str = ""
-        if ts:
-            time_str = datetime.fromtimestamp(ts).strftime("%d %b %Y, %H:%M")
-
-        sentiment = classify_headline(title)
+        time_str = datetime.fromtimestamp(ts).strftime("%d %b %Y %H:%M") if ts else ""
 
         st.markdown(
             f"""
             **[{title}]({link})**  
-            *{publisher} | {time_str}*  
-            **Sentiment:** {sentiment}
+            *{time_str}*  
+            Sentiment: {classify_sentiment(title)}
             ---
             """
-        )
-
-# -------------------------------------------------
-# PORTFOLIO ADVISORY
-# -------------------------------------------------
-st.subheader("🤖 Personalized Portfolio Advisory")
-
-capital = st.number_input("Capital (₹)", min_value=10000, step=5000)
-risk = st.selectbox("Risk Profile", ["Low", "Moderate", "High"])
-
-def build_portfolio(data, risk):
-    d = data.dropna(subset=["Price (₹)", "ROE", "Volatility %", "P/E"])
-    if risk == "Low":
-        d = d[d["Volatility %"] < d["Volatility %"].median()]
-    elif risk == "Moderate":
-        d = d.sort_values("ROE", ascending=False)
-    else:
-        d = d.sort_values("3Y CAGR %", ascending=False)
-    return d.head(5)
-
-if st.button("Generate Portfolio"):
-    pf = build_portfolio(df, risk)
-
-    if pf.empty:
-        st.warning(
-            "No stocks matched the selection criteria for this risk profile. "
-            "Try changing the risk level or filters."
-        )
-        st.stop()
-
-    allocation = capital / len(pf)
-
-    pf = pf.copy()
-    pf["Shares to Buy"] = pf["Price (₹)"].apply(lambda x: math.floor(allocation / x))
-    pf["Actual Invested (₹)"] = pf["Shares to Buy"] * pf["Price (₹)"]
-
-    total_invested = pf["Actual Invested (₹)"].sum()
-    cash_left = capital - total_invested
-
-    st.dataframe(
-        pf[
-            ["Company", "Sector", "Price (₹)", "Shares to Buy", "Actual Invested (₹)"]
-        ],
-        use_container_width=True
     )
-
-    st.markdown(
-        f"""
-        **Total Capital:** ₹{capital:,.0f}  
-        **Invested:** ₹{total_invested:,.0f}  
-        **Cash Left:** ₹{cash_left:,.0f}
-        """
-        )
