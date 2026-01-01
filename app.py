@@ -7,82 +7,64 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import os
+import re
 
-# -------------------------------------------------
-# PAGE CONFIG
-# -------------------------------------------------
-st.set_page_config(page_title="Nifty 50 Analytics Dashboard", layout="wide")
-st.title("📊 Nifty 50 Analytics & Advisory Dashboard")
+# =========================
+# CONFIG
+# =========================
+st.set_page_config(page_title="Nifty 50 Advisory Dashboard", layout="wide")
+st.title("📊 Nifty 50 – Personal Investment Advisory")
 
-# -------------------------------------------------
-# AI CONFIG
-# -------------------------------------------------
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-
-use_ai = st.sidebar.checkbox("🤖 Enable AI News Summary", value=False)
+use_ai = st.sidebar.checkbox("🤖 Enable AI News Deep Dive", value=False)
 
 if use_ai and not OPENAI_KEY:
-    st.sidebar.warning("AI enabled but API key not found")
+    st.sidebar.warning("OpenAI API key not found")
 
-# -------------------------------------------------
-# LOAD UNIVERSE
-# -------------------------------------------------
+# =========================
+# LOAD DATA
+# =========================
 @st.cache_data
 def load_universe():
     return pd.read_csv("nifty50.csv")
 
 stocks = load_universe()
 
-# -------------------------------------------------
-# SIDEBAR FILTERS
-# -------------------------------------------------
-st.sidebar.header("🔎 Filters")
-
-sector_filter = st.sidebar.multiselect(
-    "Sector",
-    sorted(stocks["Sector"].unique())
-)
-
-search_text = st.sidebar.text_input("Search Company")
+# =========================
+# FILTERS
+# =========================
+st.sidebar.header("Filters")
+sector_filter = st.sidebar.multiselect("Sector", sorted(stocks["Sector"].unique()))
+search = st.sidebar.text_input("Search Company")
 
 filtered = stocks.copy()
 if sector_filter:
     filtered = filtered[filtered["Sector"].isin(sector_filter)]
-if search_text:
-    filtered = filtered[
-        filtered["Company"].str.contains(search_text, case=False)
-    ]
+if search:
+    filtered = filtered[filtered["Company"].str.contains(search, case=False)]
 
-# -------------------------------------------------
-# METRICS ENGINE
-# -------------------------------------------------
+# =========================
+# METRICS
+# =========================
 @st.cache_data(ttl=3600)
 def get_metrics(symbol):
-    try:
-        t = yf.Ticker(symbol)
-        info = t.info
-        hist = t.history(period="3y")
+    t = yf.Ticker(symbol)
+    info = t.info
+    hist = t.history(period="3y")
 
-        price = info.get("currentPrice")
-        pe = info.get("trailingPE")
-        roe = info.get("returnOnEquity")
+    price = info.get("currentPrice")
+    pe = info.get("trailingPE")
+    roe = info.get("returnOnEquity")
 
-        r1y, cagr3, vol = None, None, None
+    vol = None
+    if not hist.empty:
+        vol = hist["Close"].pct_change().std() * (252 ** 0.5) * 100
 
-        if not hist.empty:
-            if len(hist) > 252:
-                r1y = (hist["Close"].iloc[-1] / hist["Close"].iloc[-252] - 1) * 100
-            if len(hist) > 756:
-                cagr3 = ((hist["Close"].iloc[-1] / hist["Close"].iloc[0]) ** (1/3) - 1) * 100
-            vol = hist["Close"].pct_change().std() * (252 ** 0.5) * 100
+    return price, pe, roe, vol
 
-        return price, pe, roe, r1y, cagr3, vol
-    except Exception:
-        return None, None, None, None, None, None
-
-# -------------------------------------------------
-# GOOGLE NEWS RSS
-# -------------------------------------------------
+# =========================
+# GOOGLE NEWS
+# =========================
 @st.cache_data(ttl=900)
 def fetch_google_news(company):
     query = f"{company} NSE stock"
@@ -92,118 +74,102 @@ def fetch_google_news(company):
         + "&hl=en-IN&gl=IN&ceid=IN:en"
     )
 
+    r = requests.get(url, timeout=10)
+    root = ET.fromstring(r.content)
+
+    items = []
+    for item in root.findall(".//item")[:5]:
+        title = item.findtext("title")
+        link = item.findtext("link")
+        if title and link:
+            items.append({"title": title, "link": link})
+    return items
+
+# =========================
+# ARTICLE TEXT EXTRACTION
+# =========================
+def extract_article_text(url):
     try:
-        response = requests.get(url, timeout=10)
-        root = ET.fromstring(response.content)
-
-        items = []
-        for item in root.findall(".//item")[:8]:
-            title = item.findtext("title")
-            link = item.findtext("link")
-            pub_date = item.findtext("pubDate")
-
-            if pub_date:
-                pub_date = datetime.strptime(
-                    pub_date, "%a, %d %b %Y %H:%M:%S %Z"
-                ).strftime("%d %b %Y, %H:%M")
-
-            if title:
-                items.append({
-                    "title": title,
-                    "link": link,
-                    "date": pub_date
-                })
-
-        return items
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10)
+        text = re.sub("<[^<]+?>", "", r.text)
+        text = re.sub(r"\s+", " ", text)
+        return text[:4000]  # limit tokens
     except Exception:
-        return []
+        return None
 
-# -------------------------------------------------
-# AI SUMMARIZATION
-# -------------------------------------------------
-def ai_summarize(title, company):
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_KEY)
+# =========================
+# AI NEWS DEEP DIVE
+# =========================
+def ai_news_deep_dive(company, headline, article_text):
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_KEY)
 
-        prompt = f"""
-Summarize the following news headline for a long-term equity investor.
-Do not give buy/sell advice.
+    context = article_text if article_text else headline
+
+    prompt = f"""
+You are an equity research analyst.
 
 Company: {company}
-Headline: {title}
 
-Explain:
-- What happened
-- Why it matters (or not)
-In 2–3 lines.
+News content:
+{context}
+
+Task:
+- Explain what happened
+- Explain why it matters (or does not)
+- Identify risks or positives
+- NO buy/sell advice
+- NO price prediction
+
+Keep it concise (4–6 bullet points).
 """
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=120
-        )
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=250
+    )
 
-        return response.choices[0].message.content.strip()
+    return response.choices[0].message.content.strip()
 
-    except Exception:
-        return "AI summary unavailable."
-
-# -------------------------------------------------
-# BUILD SCREENER
-# -------------------------------------------------
+# =========================
+# SCREENER
+# =========================
 rows = []
 for _, r in filtered.iterrows():
-    price, pe, roe, r1y, c3y, vol = get_metrics(r["Symbol"])
+    m = get_metrics(r["Symbol"])
     rows.append({
         "Company": r["Company"],
         "Sector": r["Sector"],
-        "Price (₹)": price,
-        "P/E": pe,
-        "ROE": roe,
-        "1Y Return %": r1y,
-        "3Y CAGR %": c3y,
-        "Volatility %": vol
+        "Price": m[0],
+        "P/E": m[1],
+        "ROE": m[2],
+        "Volatility %": m[3]
     })
 
 df = pd.DataFrame(rows)
-
-# -------------------------------------------------
-# SCREENER
-# -------------------------------------------------
 st.subheader("📋 Nifty 50 Screener")
 st.dataframe(df, use_container_width=True)
 
-# -------------------------------------------------
-# STOCK DRILL-DOWN
-# -------------------------------------------------
-st.subheader("🔍 Stock Drill-Down")
-
+# =========================
+# STOCK VIEW
+# =========================
+st.subheader("🔍 Stock Deep Dive")
 stock = st.selectbox("Select Stock", df["Company"])
-row = df[df["Company"] == stock].iloc[0]
 symbol = filtered[filtered["Company"] == stock]["Symbol"].values[0]
+metrics = get_metrics(symbol)
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Price (₹)", row["Price (₹)"])
-c2.metric("P/E", row["P/E"])
-c3.metric("ROE", row["ROE"])
+c1.metric("Price", metrics[0])
+c2.metric("P/E", metrics[1])
+c3.metric("ROE", metrics[2])
 
-# -------------------------------------------------
-# PRICE CHART
-# -------------------------------------------------
-st.subheader("📈 5-Year Price Trend")
-hist = yf.download(symbol, period="5y", progress=False)
-if not hist.empty:
-    fig, ax = plt.subplots()
-    ax.plot(hist.index, hist["Close"])
-    st.pyplot(fig)
-
-# -------------------------------------------------
-# NEWS & AI SUMMARY
-# -------------------------------------------------
-st.subheader("📰 Latest News & Events")
+# =========================
+# NEWS DEEP DIVE
+# =========================
+st.subheader("📰 News Deep Dive")
 
 news_items = fetch_google_news(stock)
 
@@ -211,16 +177,13 @@ if not news_items:
     st.info("No recent news found.")
 else:
     for n in news_items:
-        st.markdown(
-            f"""
-            **[{n['title']}]({n['link']})**  
-            *{n['date']}*
-            """
-        )
+        st.markdown(f"**{n['title']}**")
+        st.markdown(f"[Read source]({n['link']})")
 
         if use_ai and OPENAI_KEY:
-            with st.spinner("AI summarizing..."):
-                summary = ai_summarize(n["title"], stock)
-            st.markdown(f"> 🤖 **AI Insight:** {summary}")
+            with st.spinner("Analyzing article..."):
+                article_text = extract_article_text(n["link"])
+                summary = ai_news_deep_dive(stock, n["title"], article_text)
+            st.info(summary)
 
         st.markdown("---")
