@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
+import math
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(page_title="Nifty 50 Dashboard", layout="wide")
@@ -168,37 +169,55 @@ else:
 
 st.subheader("🤖 Personalized Portfolio Advisory")
 
-capital = st.number_input("Investment Amount (₹)", min_value=10000, step=5000)
+capital = st.number_input(
+    "Investment Amount (₹)",
+    min_value=10000,
+    step=5000
+)
+
 risk_profile = st.selectbox(
     "Risk Profile",
     ["Low", "Moderate", "High"]
 )
-horizon = st.slider("Investment Horizon (months)", 1, 24)
+
+horizon = st.slider(
+    "Investment Horizon (months)",
+    1, 24
+)
 
 # ---------------- PORTFOLIO LOGIC ----------------
 def build_portfolio(data, risk):
-    dfp = data.dropna(subset=["ROE", "Volatility %", "P/E"])
+    dfp = data.dropna(
+        subset=["ROE", "Volatility %", "P/E", "Price (₹)"]
+    )
 
     if risk == "Low":
         dfp = dfp[
             (dfp["Volatility %"] < dfp["Volatility %"].median()) &
             (dfp["P/E"] < dfp["P/E"].median())
         ]
-        explanation = "Low volatility and reasonable valuation stocks selected."
+        explanation = (
+            "Selected lower volatility stocks with reasonable valuation "
+            "for capital protection."
+        )
 
     elif risk == "Moderate":
         dfp = dfp.sort_values(
             by=["ROE", "1Y Return %"],
             ascending=False
         )
-        explanation = "Balanced mix based on profitability and performance."
+        explanation = (
+            "Balanced portfolio based on profitability and recent performance."
+        )
 
     else:  # High risk
         dfp = dfp.sort_values(
             by=["3Y CAGR %", "1Y Return %"],
             ascending=False
         )
-        explanation = "High growth and momentum-oriented stocks selected."
+        explanation = (
+            "Growth- and momentum-focused portfolio suitable for higher risk appetite."
+        )
 
     return dfp.head(5), explanation
 
@@ -208,20 +227,53 @@ if st.button("Generate Portfolio"):
     if portfolio.empty:
         st.warning("Insufficient data to generate portfolio.")
     else:
-        allocation = capital / len(portfolio)
-        portfolio = portfolio.copy()
-        portfolio["Allocation (₹)"] = allocation
+        allocation_per_stock = capital / len(portfolio)
 
-        st.success("📌 Suggested Portfolio")
+        portfolio = portfolio.copy()
+        portfolio["Suggested Allocation (₹)"] = allocation_per_stock
+
+        # Calculate shares
+        portfolio["Shares to Buy"] = portfolio["Price (₹)"].apply(
+            lambda x: math.floor(allocation_per_stock / x)
+            if x and x > 0 else 0
+        )
+
+        portfolio["Actual Invested (₹)"] = (
+            portfolio["Shares to Buy"] * portfolio["Price (₹)"]
+        )
+
+        total_invested = portfolio["Actual Invested (₹)"].sum()
+        cash_left = capital - total_invested
+
+        st.success("📌 Suggested Model Portfolio")
+
         st.dataframe(
             portfolio[
-                ["Company", "Sector", "Allocation (₹)", "ROE", "P/E", "Volatility %"]
+                [
+                    "Company",
+                    "Sector",
+                    "Price (₹)",
+                    "Shares to Buy",
+                    "Actual Invested (₹)",
+                    "ROE",
+                    "P/E",
+                    "Volatility %"
+                ]
             ],
             use_container_width=True
         )
 
-        st.info(f"🧠 Logic Used: {reason}")
+        st.markdown(
+            f"""
+            **💰 Total Capital:** ₹{capital:,.0f}  
+            **📉 Invested Amount:** ₹{total_invested:,.0f}  
+            **💵 Cash Remaining:** ₹{cash_left:,.0f}
+            """
+        )
+
+        st.info(f"🧠 Portfolio Logic: {reason}")
 
         st.caption(
-            "⚠️ This is a rule-based illustrative model, not investment advice."
-)
+            "⚠️ This is a rule-based illustrative model for educational purposes, "
+            "not investment advice."
+        )
