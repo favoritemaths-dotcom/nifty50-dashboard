@@ -242,6 +242,14 @@ def build_portfolio(data, risk):
 
 if st.button("Generate Portfolio"):
     pf = build_portfolio(df, risk)
+
+    if pf.empty:
+        st.warning(
+            "No stocks matched the selection criteria for this risk profile. "
+            "Try changing the risk level or filters."
+        )
+        st.stop()
+
     allocation = capital / len(pf)
 
     pf = pf.copy()
