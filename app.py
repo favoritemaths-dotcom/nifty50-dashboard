@@ -3,13 +3,26 @@ import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 import math
+import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime
+import os
 
 # -------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------
 st.set_page_config(page_title="Nifty 50 Analytics Dashboard", layout="wide")
 st.title("📊 Nifty 50 Analytics & Advisory Dashboard")
+
+# -------------------------------------------------
+# AI CONFIG
+# -------------------------------------------------
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+
+use_ai = st.sidebar.checkbox("🤖 Enable AI News Summary", value=False)
+
+if use_ai and not OPENAI_KEY:
+    st.sidebar.warning("AI enabled but API key not found")
 
 # -------------------------------------------------
 # LOAD UNIVERSE
@@ -68,82 +81,75 @@ def get_metrics(symbol):
         return None, None, None, None, None, None
 
 # -------------------------------------------------
-# ROBUST CASH FLOW CHECK (FIXED)
-# -------------------------------------------------
-@st.cache_data(ttl=3600)
-def get_cashflow_flags(symbol):
-    try:
-        t = yf.Ticker(symbol)
-        cf = t.cashflow
-        inc = t.financials
-
-        if cf is None or inc is None or cf.empty or inc.empty:
-            return ["Cash-flow data not published by source"]
-
-        # Possible row names (Yahoo is inconsistent)
-        cfo_rows = [
-            "Total Cash From Operating Activities",
-            "Operating Cash Flow",
-            "Net Cash Provided by Operating Activities"
-        ]
-
-        cfo = None
-        for r in cfo_rows:
-            if r in cf.index:
-                cfo = cf.loc[r].iloc[0]
-                break
-
-        if cfo is None:
-            return ["Operating cash-flow not reported"]
-
-        if "Net Income" not in inc.index:
-            return ["Net income data unavailable"]
-
-        net_profit = inc.loc["Net Income"].iloc[0]
-
-        flags = []
-
-        if cfo < net_profit:
-            flags.append("Operating cash flow is lower than net profit")
-
-        if net_profit != 0:
-            ratio = cfo / net_profit
-            if ratio < 0.8:
-                flags.append("Weak cash conversion (CFO / Net Profit < 0.8)")
-
-        if net_profit > 0 and cfo < 0:
-            flags.append("Negative operating cash flow despite positive profit")
-
-        if not flags:
-            flags.append("Cash flows broadly support reported profits")
-
-        return flags
-
-    except Exception:
-        return ["Cash-flow data not available"]
-
-# -------------------------------------------------
-# NEWS ENGINE (IMPROVED)
+# GOOGLE NEWS RSS
 # -------------------------------------------------
 @st.cache_data(ttl=900)
-def get_stock_news(symbol):
+def fetch_google_news(company):
+    query = f"{company} NSE stock"
+    url = (
+        "https://news.google.com/rss/search?q="
+        + requests.utils.quote(query)
+        + "&hl=en-IN&gl=IN&ceid=IN:en"
+    )
+
     try:
-        n = yf.Ticker(symbol).news
-        return [x for x in n if x.get("title")]
+        response = requests.get(url, timeout=10)
+        root = ET.fromstring(response.content)
+
+        items = []
+        for item in root.findall(".//item")[:8]:
+            title = item.findtext("title")
+            link = item.findtext("link")
+            pub_date = item.findtext("pubDate")
+
+            if pub_date:
+                pub_date = datetime.strptime(
+                    pub_date, "%a, %d %b %Y %H:%M:%S %Z"
+                ).strftime("%d %b %Y, %H:%M")
+
+            if title:
+                items.append({
+                    "title": title,
+                    "link": link,
+                    "date": pub_date
+                })
+
+        return items
     except Exception:
         return []
 
-def classify_sentiment(title):
-    title = title.lower()
+# -------------------------------------------------
+# AI SUMMARIZATION
+# -------------------------------------------------
+def ai_summarize(title, company):
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_KEY)
 
-    positive = ["profit", "growth", "order", "approval", "record", "expansion"]
-    negative = ["loss", "penalty", "fraud", "probe", "downgrade", "decline"]
+        prompt = f"""
+Summarize the following news headline for a long-term equity investor.
+Do not give buy/sell advice.
 
-    if any(w in title for w in positive):
-        return "🟢 Positive"
-    if any(w in title for w in negative):
-        return "🔴 Caution"
-    return "🟡 Neutral"
+Company: {company}
+Headline: {title}
+
+Explain:
+- What happened
+- Why it matters (or not)
+In 2–3 lines.
+"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=120
+        )
+
+        return response.choices[0].message.content.strip()
+
+    except Exception:
+        return "AI summary unavailable."
 
 # -------------------------------------------------
 # BUILD SCREENER
@@ -171,7 +177,7 @@ st.subheader("📋 Nifty 50 Screener")
 st.dataframe(df, use_container_width=True)
 
 # -------------------------------------------------
-# STOCK VIEW
+# STOCK DRILL-DOWN
 # -------------------------------------------------
 st.subheader("🔍 Stock Drill-Down")
 
@@ -195,36 +201,26 @@ if not hist.empty:
     st.pyplot(fig)
 
 # -------------------------------------------------
-# CASH FLOW DISPLAY
-# -------------------------------------------------
-st.subheader("💧 Cash Flow Quality Check")
-for f in get_cashflow_flags(symbol):
-    if "support" in f.lower():
-        st.success(f)
-    else:
-        st.warning(f)
-
-# -------------------------------------------------
-# NEWS DISPLAY
+# NEWS & AI SUMMARY
 # -------------------------------------------------
 st.subheader("📰 Latest News & Events")
 
-news = get_stock_news(symbol)
+news_items = fetch_google_news(stock)
 
-if not news:
-    st.info("No recent news available from public sources.")
+if not news_items:
+    st.info("No recent news found.")
 else:
-    for n in news[:8]:
-        title = n["title"]
-        link = n.get("link", "")
-        ts = n.get("providerPublishTime")
-        time_str = datetime.fromtimestamp(ts).strftime("%d %b %Y %H:%M") if ts else ""
-
+    for n in news_items:
         st.markdown(
             f"""
-            **[{title}]({link})**  
-            *{time_str}*  
-            Sentiment: {classify_sentiment(title)}
-            ---
+            **[{n['title']}]({n['link']})**  
+            *{n['date']}*
             """
-    )
+        )
+
+        if use_ai and OPENAI_KEY:
+            with st.spinner("AI summarizing..."):
+                summary = ai_summarize(n["title"], stock)
+            st.markdown(f"> 🤖 **AI Insight:** {summary}")
+
+        st.markdown("---")
