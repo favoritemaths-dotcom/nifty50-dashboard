@@ -44,6 +44,17 @@ stock_name = st.selectbox("Select Stock", final_df["Company"])
 selected = final_df[final_df["Company"] == stock_name].iloc[0]
 st.metric("Price", selected["Price"])
 
-hist = yf.download(df[df["Company"] == stock_name]["Symbol"].values[0], period="5y")
-fig = px.line(hist, y="Close", title="5Y Price Chart")
-st.plotly_chart(fig, use_container_width=True)
+symbol = df[df["Company"] == stock_name]["Symbol"].values[0]
+hist = yf.download(symbol, period="5y", progress=False)
+
+if not hist.empty:
+    hist = hist.reset_index()
+    fig = px.line(
+        hist,
+        x="Date",
+        y="Close",
+        title="5Y Price Chart"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.warning("Price data unavailable for this stock at the moment.")
